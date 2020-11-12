@@ -30,15 +30,26 @@
 
 #include "motiondetect.h"
 
-/* type for a function that calculates the transformation of a certain field
- */
-typedef LocalMotion (*calcFieldTransFunc)(VSMotionDetect*, VSMotionDetectFields*,
-                                          const Field*, int);
-
 /* type for a function that calculates the contrast of a certain field
  */
 typedef double (*contrastSubImgFunc)(VSMotionDetect*, const Field*);
 
+typedef unsigned int (*compareSubImgFunc)(unsigned char* const I1, unsigned char* const I2,
+                                      const Field* field,
+                                      int width1, int width2, int height, int bytesPerPixel,
+                                      int d_x, int d_y, unsigned int threshold);
+
+typedef unsigned int (*calcFieldTransCoarseFunc)(uint8_t* const Y_c, const int linesize_c,
+                                              uint8_t* const Y_p, const int linesize_p, 
+                                              const Field* field, const int frameHeight,
+                                              const int offset_x, const int offset_y,
+                                              const int maxShift, const int stepSize,
+                                              int* tx, int*ty);
+
+/* type for a function that calculates the transformation of a certain field
+ */
+typedef LocalMotion (*calcFieldTransFunc)(VSMotionDetect*, VSMotionDetectFields*,
+                                          const Field*, int, calcFieldTransCoarseFunc);
 
 int initFields(VSMotionDetect* md, VSMotionDetectFields* fs,
                int fieldSize, int maxShift, int stepSize, short border,
@@ -54,11 +65,40 @@ int cmp_contrast_idx(const void *ci1, const void* ci2);
 VSVector selectfields(VSMotionDetect* md, VSMotionDetectFields* fields,
                       contrastSubImgFunc contrastfunc);
 
+unsigned int calcFieldTransPlanarCoarseOrigin(uint8_t* const Y_c, const int linesize_c,
+                                              uint8_t* const Y_p, const int linesize_p, 
+                                              const Field* field, const int frameHeight,
+                                              const int offset_x, const int offset_y,
+                                              const int maxShift, const int stepSize,
+                                              int* tx, int*ty);
+
+unsigned int calcFieldTransPlanarCoarseSpiral(uint8_t* const Y_c, const int linesize_c,
+                                              uint8_t* const Y_p, const int linesize_p, 
+                                              const Field* field, const int frameHeight,
+                                              const int offset_x, const int offset_y,
+                                              const int maxShift, const int stepSize,
+                                              int* tx, int* ty);
+
+unsigned int calcFieldTransPlanarFine(uint8_t* const Y_c, const int linesize_c,
+                                              uint8_t* const Y_p, const int linesize_p, 
+                                              const Field* field, const int frameHeight,
+                                              const int offset_x, const int offset_y,
+                                              const int maxShift, int stepSize,
+                                              int* tx, int*ty, unsigned int minerror);
+
+unsigned int calcFieldTransPackedCoarseOrigin(uint8_t* const Y_c, const int linesize_c,
+                                              uint8_t* const Y_p, const int linesize_p, 
+                                              const Field* field, const int frameHeight,
+                                              const int offset_x, const int offset_y,
+                                              const int maxShift, const int stepSize,
+                                              int* tx, int*ty);
+
 LocalMotion calcFieldTransPlanar(VSMotionDetect* md, VSMotionDetectFields* fields,
-                                 const Field* field, int fieldnum);
+                                 const Field* field, int fieldnum, calcFieldTransCoarseFunc calcCoarseFunc);
 LocalMotion calcFieldTransPacked(VSMotionDetect* md, VSMotionDetectFields* fields,
-                                 const Field* field, int fieldnum);
+                                 const Field* field, int fieldnum, calcFieldTransCoarseFunc calcCoarseFunc);
 LocalMotions calcTransFields(VSMotionDetect* md, VSMotionDetectFields* fields,
+                             calcFieldTransCoarseFunc coarsefieldfunc,
                              calcFieldTransFunc fieldfunc,
                              contrastSubImgFunc contrastfunc);
 

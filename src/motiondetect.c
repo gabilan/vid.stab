@@ -205,10 +205,18 @@ int vsMotionDetection(VSMotionDetect* md, LocalMotions* motions, VSFrame *frame)
     //    md->curr = frame;
     if (md->fi.pFormat > PF_PACKED) {
       motionscoarse = calcTransFields(md, &md->fieldscoarse,
-                                      calcFieldTransPacked, contrastSubImgPacked);
+                                      calcFieldTransPackedCoarseOrigin,
+                                      calcFieldTransPacked,
+                                      contrastSubImgPacked);
     } else { // PLANAR
       motionscoarse = calcTransFields(md, &md->fieldscoarse,
-                                      calcFieldTransPlanar, contrastSubImgPlanar);
+#ifdef USE_SPIRAL_FIELD_CALC
+                                      calcFieldTransPlanarCoarseSpiral,
+#else
+                                      calcFieldTransPlanarCoarseOrigin,
+#endif
+                                      calcFieldTransPlanar,
+                                      contrastSubImgPlanar);
     }
     int num_motions = vs_vector_size(&motionscoarse);
     if (num_motions < 1) {
@@ -222,9 +230,14 @@ int vsMotionDetection(VSMotionDetect* md, LocalMotions* motions, VSFrame *frame)
       LocalMotions motions2;
       if (md->fi.pFormat > PF_PACKED) {
         motions2 = calcTransFields(md, &md->fieldsfine,
-                                   calcFieldTransPacked, contrastSubImgPacked);
+                                   calcFieldTransPackedCoarseOrigin, calcFieldTransPacked, contrastSubImgPacked);
       } else { // PLANAR
         motions2 = calcTransFields(md, &md->fieldsfine,
+#ifdef USE_SPIRAL_FIELD_CALC
+                                   calcFieldTransPlanarCoarseSpiral,
+#else
+                                   calcFieldTransPlanarCoarseOrigin,
+#endif
                                    calcFieldTransPlanar, contrastSubImgPlanar);
       }
       // through out those with bad match (worse than mean of coarse scan)
@@ -377,63 +390,61 @@ double contrastSubImg(unsigned char* const I, const Field* field, int width,
   return (maxi - mini) / (maxi + mini + 0.1); // +0.1 to avoid division by 0
 }
 
-/* calculates the optimal transformation for one field in Planar frames
- * (only luminance)
- */
-LocalMotion calcFieldTransPlanar(VSMotionDetect* md, VSMotionDetectFields* fs,
-                                 const Field* field, int fieldnum) {
-  int tx = 0;
-  int ty = 0;
-  uint8_t *Y_c = md->curr.data[0], *Y_p = md->prev.data[0];
-  int linesize_c = md->curr.linesize[0], linesize_p = md->prev.linesize[0];
-  // we only use the luminance part of the image
-  int i, j;
-  int stepSize = fs->stepSize;
-  int maxShift = fs->maxShift;
-  Vec offset = { 0, 0};
-  LocalMotion lm = null_localmotion();
-  if(fs->useOffset){
-    // Todo: we could put the preparedtransform into fs
-    PreparedTransform pt = prepare_transform(&fs->offset, &md->fi);
-    Vec fieldpos = {field->x, field->y};
-    offset = sub_vec(transform_vec(&pt, &fieldpos), fieldpos);
-    // is the field still in the frame
-    int s2 = field->size/2;
-    if(unlikely(fieldpos.x+offset.x-s2-maxShift-stepSize < 0 ||
-                fieldpos.x+offset.x+s2+maxShift+stepSize >= md->fi.width ||
-                fieldpos.y+offset.y-s2-maxShift-stepSize < 0 ||
-                fieldpos.y+offset.y+s2+maxShift+stepSize >= md->fi.height)){
-      lm.match=-1;
-      return lm;
+/* Here we improve speed by checking first the most probable position
+   then the search paths are most effectively cut. (0,0) is a simple start
+*/
+unsigned int calcFieldTransPlanarCoarseOrigin(uint8_t* const Y_c, const int linesize_c,
+                                              uint8_t* const Y_p, const int linesize_p, 
+                                              const Field* field, const int frameHeight,
+                                              const int offset_x, const int offset_y,
+                                              const int maxShift, const int stepSize,
+                                              int* tx, int*ty) {
+  int i = 0, j = 0;
+  unsigned int minerror = compareSubImg(Y_c, Y_p, field, linesize_c, linesize_p,
+                                        frameHeight, 1, 0, 0, UINT_MAX);
+  // check all positions...
+  for (i = -maxShift; i <= maxShift; i += stepSize) {
+    for (j = -maxShift; j <= maxShift; j += stepSize) {
+      if( i==0 && j==0 )
+        continue; //no need to check this since already done
+      unsigned int error = compareSubImg(Y_c, Y_p, field, linesize_c, linesize_p,
+                                         frameHeight, 1, i + offset_x, j + offset_y, minerror);
+      if (error < minerror) {
+        minerror = error;
+        *tx = i;
+        *ty = j;
+      }
+#ifdef STABVERBOSE
+      fprintf(f, "%i %i %f\n", i, j, error);
+#endif
     }
   }
 
-#ifdef STABVERBOSE
-  // printf("%i %i %f\n", md->frameNum, fieldnum, contr);
-  FILE *f = NULL;
-  char buffer[32];
-  vs_snprintf(buffer, sizeof(buffer), "f%04i_%02i.dat", md->frameNum, fieldnum);
-  f = fopen(buffer, "w");
-  fprintf(f, "# splot \"%s\"\n", buffer);
-#endif
+  return minerror;
+}
 
-#ifdef USE_SPIRAL_FIELD_CALC
+unsigned int calcFieldTransPlanarCoarseSpiral(uint8_t* const Y_c, const int linesize_c,
+                                              uint8_t* const Y_p, const int linesize_p, 
+                                              const Field* field, const int frameHeight,
+                                              const int offset_x, const int offset_y,
+                                              const int maxShift, const int stepSize,
+                                              int* tx, int*ty) {
   unsigned int minerror = UINT_MAX;
 
   // check all positions by outgoing spiral
-  i = 0; j = 0;
+  int i = 0, j = 0;
   int limit = 1;
   int step = 0;
   int dir = 0;
   while (j >= -maxShift && j <= maxShift && i >= -maxShift && i <= maxShift) {
     unsigned int error = compareSubImg(Y_c, Y_p, field, linesize_c, linesize_p,
-                                       md->fi.height, 1, i + offset.x, j + offset.y,
+                                       frameHeight, 1, i + offset_x, j + offset_y,
                                        minerror);
 
     if (error < minerror) {
       minerror = error;
-      tx = i;
-      ty = j;
+      *tx = i;
+      *ty = j;
     }
 
     //spiral indexing...
@@ -471,55 +482,89 @@ LocalMotion calcFieldTransPlanar(VSMotionDetect* md, VSMotionDetectFields* fs,
       break;
     }
   }
-#else
-  /* Here we improve speed by checking first the most probable position
-     then the search paths are most effectively cut. (0,0) is a simple start
-  */
-  unsigned int minerror = compareSubImg(Y_c, Y_p, field, linesize_c, linesize_p,
-                                        md->fi.height, 1, 0, 0, UINT_MAX);
-  // check all positions...
-  for (i = -maxShift; i <= maxShift; i += stepSize) {
-    for (j = -maxShift; j <= maxShift; j += stepSize) {
-      if( i==0 && j==0 )
-        continue; //no need to check this since already done
-      unsigned int error = compareSubImg(Y_c, Y_p, field, linesize_c, linesize_p,
-                                         md->fi.height, 1, i+offset.x, j+offset.y, minerror);
-      if (error < minerror) {
-        minerror = error;
-        tx = i;
-        ty = j;
-      }
-#ifdef STABVERBOSE
-      fprintf(f, "%i %i %f\n", i, j, error);
-#endif
-    }
-  }
 
-#endif
+  return minerror;
+}
 
+unsigned int calcFieldTransPlanarFine(uint8_t* const Y_c, const int linesize_c,
+                                      uint8_t* const Y_p, const int linesize_p, 
+                                      const Field* field, const int frameHeight,
+                                      const int offset_x, const int offset_y,
+                                      const int maxShift, int stepSize,
+                                      int* tx, int*ty, unsigned int minerror) {
+  int i = 0, j = 0;
   while(stepSize > 1) {// make fine grain check around the best match
-    int txc = tx; // save the shifts
-    int tyc = ty;
-    int newStepSize = stepSize/2;
+    int txc = *tx; // save the shifts
+    int tyc = *ty;
+    int newStepSize = stepSize / 2;
     int r = stepSize - newStepSize;
     for (i = txc - r; i <= txc + r; i += newStepSize) {
       for (j = tyc - r; j <= tyc + r; j += newStepSize) {
         if (i == txc && j == tyc)
           continue; //no need to check this since already done
         unsigned int error = compareSubImg(Y_c, Y_p, field, linesize_c, linesize_p,
-                                           md->fi.height, 1, i+offset.x, j+offset.y, minerror);
+                                           frameHeight, 1, i + offset_x, j + offset_y, minerror);
 #ifdef STABVERBOSE
         fprintf(f, "%i %i %f\n", i, j, error);
 #endif
         if (error < minerror) {
           minerror = error;
-          tx = i;
-          ty = j;
+          *tx = i;
+          *ty = j;
         }
       }
     }
     stepSize /= 2;
   }
+
+  return minerror;
+}
+
+/* calculates the optimal transformation for one field in Planar frames
+ * (only luminance)
+ */
+LocalMotion calcFieldTransPlanar(VSMotionDetect* md, VSMotionDetectFields* fs,
+                                 const Field* field, int fieldnum, calcFieldTransCoarseFunc calcCoarseFunc) {
+  int tx = 0;
+  int ty = 0;
+  uint8_t *Y_c = md->curr.data[0], *Y_p = md->prev.data[0];
+  int linesize_c = md->curr.linesize[0], linesize_p = md->prev.linesize[0];
+  // we only use the luminance part of the image
+  int stepSize = fs->stepSize;
+  int maxShift = fs->maxShift;
+  Vec offset = { 0, 0};
+  LocalMotion lm = null_localmotion();
+  if(fs->useOffset){
+    // Todo: we could put the preparedtransform into fs
+    PreparedTransform pt = prepare_transform(&fs->offset, &md->fi);
+    Vec fieldpos = {field->x, field->y};
+    offset = sub_vec(transform_vec(&pt, &fieldpos), fieldpos);
+    // is the field still in the frame
+    int s2 = field->size/2;
+    if(unlikely(fieldpos.x+offset.x-s2-maxShift-stepSize < 0 ||
+                fieldpos.x+offset.x+s2+maxShift+stepSize >= md->fi.width ||
+                fieldpos.y+offset.y-s2-maxShift-stepSize < 0 ||
+                fieldpos.y+offset.y+s2+maxShift+stepSize >= md->fi.height)){
+      lm.match=-1;
+      return lm;
+    }
+  }
+
+#ifdef STABVERBOSE
+  // printf("%i %i %f\n", md->frameNum, fieldnum, contr);
+  FILE *f = NULL;
+  char buffer[32];
+  vs_snprintf(buffer, sizeof(buffer), "f%04i_%02i.dat", md->frameNum, fieldnum);
+  f = fopen(buffer, "w");
+  fprintf(f, "# splot \"%s\"\n", buffer);
+#endif
+
+  unsigned int coarseMinError = calcCoarseFunc(Y_c, linesize_c, Y_p, linesize_p, field, md->fi.height, offset.x, offset.y,
+                                          maxShift, stepSize, &tx, &ty);
+
+  unsigned int minerror = calcFieldTransPlanarFine(Y_c, linesize_c, Y_p, linesize_p, field, md->fi.height, offset.x, offset.y,
+                                          maxShift, stepSize, &tx, &ty, coarseMinError);
+
 #ifdef STABVERBOSE
   fclose(f);
   vs_log_msg(md->modName, "Minerror: %f\n", minerror);
@@ -540,11 +585,41 @@ LocalMotion calcFieldTransPlanar(VSMotionDetect* md, VSMotionDetectFields* fs,
   return lm;
 }
 
+unsigned int calcFieldTransPackedCoarseOrigin(uint8_t* const Y_c, const int linesize_c,
+                                              uint8_t* const Y_p, const int linesize_p, 
+                                              const Field* field, const int frameHeight,
+                                              const int offset_x, const int offset_y,
+                                              const int maxShift, const int stepSize,
+                                              int* tx, int*ty) {
+  int i = 0, j = 0;
+  /* Here we improve speed by checking first the most probable position
+     then the search paths are most effectively cut. (0,0) is a simple start
+  */
+  unsigned int minerror = compareSubImg(Y_c, Y_p, field, linesize_c, linesize_p, frameHeight,
+                                        3, offset_x, offset_y, UINT_MAX);
+  // check all positions...
+  for (i = -maxShift; i <= maxShift; i += stepSize) {
+    for (j = -maxShift; j <= maxShift; j += stepSize) {
+      if( i==0 && j==0 )
+        continue; //no need to check this since already done
+      unsigned int error = compareSubImg(Y_c, Y_p, field, linesize_c, linesize_p, frameHeight,
+                                         3, i + offset_x, j + offset_y, minerror);
+      if (error < minerror) {
+        minerror = error;
+        *tx = i;
+        *ty = j;
+      }
+    }
+  }
+
+  return minerror;
+}
+
 /* calculates the optimal transformation for one field in Packed
  *   slower than the Planar version because it uses all three color channels
  */
 LocalMotion calcFieldTransPacked(VSMotionDetect* md, VSMotionDetectFields* fs,
-                                 const Field* field, int fieldnum) {
+                                 const Field* field, int fieldnum, calcFieldTransCoarseFunc calcCoarseFunc) {
   int tx = 0;
   int ty = 0;
   uint8_t *I_c = md->curr.data[0], *I_p = md->prev.data[0];
@@ -567,25 +642,9 @@ LocalMotion calcFieldTransPacked(VSMotionDetect* md, VSMotionDetectFields* fs,
     }
   }
 
-  /* Here we improve speed by checking first the most probable position
-     then the search paths are most effectively cut. (0,0) is a simple start
-  */
-  unsigned int minerror = compareSubImg(I_c, I_p, field, width1, width2, md->fi.height,
-                                        3, offset.x, offset.y, UINT_MAX);
-  // check all positions...
-  for (i = -maxShift; i <= maxShift; i += stepSize) {
-    for (j = -maxShift; j <= maxShift; j += stepSize) {
-      if( i==0 && j==0 )
-        continue; //no need to check this since already done
-      unsigned int error = compareSubImg(I_c, I_p, field, width1, width2,
-                                         md->fi.height, 3, i + offset.x, j + offset.y, minerror);
-      if (error < minerror) {
-        minerror = error;
-        tx = i;
-        ty = j;
-      }
-    }
-  }
+  unsigned int minerror = calcCoarseFunc(I_c, width1, I_p, width2, field, md->fi.height, offset.x, offset.y,
+                                                            maxShift, stepSize, &tx, &ty);
+
   if (stepSize > 1) { // make fine grain check around the best match
     int txc = tx; // save the shifts
     int tyc = ty;
@@ -711,6 +770,7 @@ VSVector selectfields(VSMotionDetect* md, VSMotionDetectFields* fs,
  */
 LocalMotions calcTransFields(VSMotionDetect* md,
                              VSMotionDetectFields* fields,
+                             calcFieldTransCoarseFunc coarsefieldfunc,
                              calcFieldTransFunc fieldfunc,
                              contrastSubImgFunc contrastfunc) {
   LocalMotions localmotions;
@@ -733,7 +793,7 @@ LocalMotions calcTransFields(VSMotionDetect* md,
   for(int index=0; index < vs_vector_size(&goodflds); index++){
     int i = ((contrast_idx*)vs_vector_get(&goodflds,index))->index;
     LocalMotion m;
-    m = fieldfunc(md, fields, &fields->fields[i], i); // e.g. calcFieldTransPlanar
+    m = fieldfunc(md, fields, &fields->fields[i], i, coarsefieldfunc); // e.g. calcFieldTransPlanar
     if(m.match >= 0){
       m.contrast = ((contrast_idx*)vs_vector_get(&goodflds,index))->contrast;
 #ifdef STABVERBOSE

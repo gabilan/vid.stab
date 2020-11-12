@@ -33,15 +33,9 @@ void test_checkCompareImg(const TestData* testdata){
   vsMotionDetectionCleanup(&md);
 }
 
-
-typedef unsigned int (*cmpSubImgFunc)(unsigned char* const I1, unsigned char* const I2,
-                                      const Field* field,
-                                      int width1, int width2, int height, int bytesPerPixel,
-                                      int d_x, int d_y, unsigned int threshold);
-
 // runs the compareSubImg routine and returns the time and stores the difference.
 //  if diffsRef is given than the results are validated
-int runcompare( cmpSubImgFunc cmpsubfunc,
+int runcompare( compareSubImgFunc cmpsubfunc,
                 VSFrame frame1, VSFrame frame2, Field f,
                 VSFrameInfo fi, int* diffs, int* diffsRef, int numruns){
   int start = timeOfDayinMS();
